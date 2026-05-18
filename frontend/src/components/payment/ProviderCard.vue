@@ -73,6 +73,7 @@ import { PAYMENT_MODE_QRCODE, PAYMENT_MODE_POPUP } from './providerConfig'
 
 const PROVIDER_KEY_LABELS: Record<string, string> = {
   easypay: 'admin.settings.payment.providerEasypay',
+  xorpay: 'admin.settings.payment.providerXorpay',
   alipay: 'admin.settings.payment.providerAlipay',
   wxpay: 'admin.settings.payment.providerWxpay',
   stripe: 'admin.settings.payment.providerStripe',
