@@ -126,10 +126,16 @@ func (x *XorPay) CreatePayment(ctx context.Context, req payment.CreatePaymentReq
 		"order_id":   req.OrderID,
 		"notify_url": notifyURL,
 	}
-	if req.ReturnURL != "" {
-		params["return_url"] = req.ReturnURL
-	} else if x.config["returnUrl"] != "" {
-		params["return_url"] = x.config["returnUrl"]
+	// XorPay 仅 jsapi / cashier 支付方式支持 return_url（且需联系客服开通点金计划）。
+	// native（微信扫码）/ alipay 当面付 文档均未列 return_url 字段，
+	// 实测传入超长 return_url（>~200 字节）会被 XorPay 服务端直接拒绝并返回
+	// `{"status":"api_error","info":null}`，因此对不支持 return_url 的支付方式不发送该字段。
+	if xorPaySupportsReturnURL(payType) {
+		if req.ReturnURL != "" {
+			params["return_url"] = req.ReturnURL
+		} else if x.config["returnUrl"] != "" {
+			params["return_url"] = x.config["returnUrl"]
+		}
 	}
 	if req.OpenID != "" {
 		params["openid"] = req.OpenID
@@ -169,6 +175,19 @@ func xorPayResolvePayType(paymentType string) string {
 		return xorPayPayTypeNative
 	default:
 		return xorPayPayTypeAlipay
+	}
+}
+
+// xorPaySupportsReturnURL 报告给定 pay_type 是否官方支持 return_url 字段。
+// 当前 XorPay 仅 jsapi（含 cashier 收银台）支持 return_url；
+// native / alipay 当面付 / barcode 等接口文档均未列 return_url 字段，
+// 实测传入会触发 api_error。
+func xorPaySupportsReturnURL(payType string) bool {
+	switch strings.TrimSpace(payType) {
+	case "jsapi", "cashier":
+		return true
+	default:
+		return false
 	}
 }
 
