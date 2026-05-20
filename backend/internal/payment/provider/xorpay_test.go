@@ -182,3 +182,79 @@ func assertFormValue(t *testing.T, form url.Values, key, want string) {
 		t.Fatalf("form[%s] = %q, want %q", key, got, want)
 	}
 }
+
+// TestXorPayCreatePaymentOmitsReturnURLForUnsupportedPayTypes 验证：
+// XorPay native / alipay 当面付 接口文档不支持 return_url 字段，
+// 即使上层传入也不应该转发到上游（否则 XorPay 会返回 api_error）。
+func TestXorPayCreatePaymentOmitsReturnURLForUnsupportedPayTypes(t *testing.T) {
+	cases := []struct {
+		name        string
+		paymentType string
+	}{
+		{"wxpay-native", payment.TypeWxpay},
+		{"wxpay-direct-native", payment.TypeWxpayDirect},
+		{"alipay-face-to-face", payment.TypeAlipay},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotForm url.Values
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Fatalf("ParseForm: %v", err)
+				}
+				gotForm = r.PostForm
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status": "ok",
+					"aoid":   "AO123",
+					"info":   map[string]any{"qr": "https://qr.example/test"},
+				})
+			}))
+			defer server.Close()
+
+			provider, err := NewXorPay("1", map[string]string{
+				"aid":       "aid123",
+				"appSecret": "secret",
+				"apiBase":   server.URL,
+				"notifyUrl": "https://example.com/api/v1/payment/webhook/xorpay",
+				"returnUrl": "https://example.com/payment/result",
+			})
+			if err != nil {
+				t.Fatalf("NewXorPay: %v", err)
+			}
+
+			_, err = provider.CreatePayment(context.Background(), payment.CreatePaymentRequest{
+				OrderID:     "order-1",
+				Amount:      "12.30",
+				Subject:     "Sub2API 充值",
+				NotifyURL:   "https://notify.local/xorpay",
+				ReturnURL:   "https://app.example/payment/result?token=AAAA",
+				PaymentType: tc.paymentType,
+			})
+			if err != nil {
+				t.Fatalf("CreatePayment: %v", err)
+			}
+
+			if got := gotForm.Get("return_url"); got != "" {
+				t.Fatalf("return_url should be omitted for pay_type %q, got %q", tc.paymentType, got)
+			}
+		})
+	}
+}
+
+// TestXorPaySupportsReturnURL 校验 helper 行为，与 XorPay 文档保持一致。
+func TestXorPaySupportsReturnURL(t *testing.T) {
+	cases := map[string]bool{
+		"native":         false,
+		"alipay":         false,
+		"jsapi":          true,
+		"cashier":        true,
+		"wechat_barcode": false,
+		"alipay_barcode": false,
+		"":               false,
+	}
+	for payType, want := range cases {
+		if got := xorPaySupportsReturnURL(payType); got != want {
+			t.Errorf("xorPaySupportsReturnURL(%q) = %v, want %v", payType, got, want)
+		}
+	}
+}
