@@ -165,12 +165,20 @@ type SettingService struct {
 	openAICodexUASF           singleflight.Group
 }
 
+// DefaultPlatformQuotaSetting 单 platform 三档限额（nil = 沿用上层；0 = 显式禁用；>0 = 上限）
+type DefaultPlatformQuotaSetting struct {
+	DailyLimitUSD   *float64 `json:"daily"`
+	WeeklyLimitUSD  *float64 `json:"weekly"`
+	MonthlyLimitUSD *float64 `json:"monthly"`
+}
+
 type ProviderDefaultGrantSettings struct {
 	Balance          float64
 	Concurrency      int
 	Subscriptions    []DefaultSubscriptionSetting
 	GrantOnSignup    bool
 	GrantOnFirstBind bool
+	PlatformQuotas   map[string]*DefaultPlatformQuotaSetting // key = platform name
 }
 
 type AuthSourceDefaultSettings struct {
@@ -185,62 +193,80 @@ type AuthSourceDefaultSettings struct {
 }
 
 type authSourceDefaultKeySet struct {
+	// source 是 auth source 标识（如 "email"、"github"），仅用于 parse 时
+	// slog.Warn 诊断输出，不再参与 key 拼接（platformQuotas 字段已存完整 key）。
+	source           string
 	balance          string
 	concurrency      string
 	subscriptions    string
 	grantOnSignup    string
 	grantOnFirstBind string
+	platformQuotas   string // SettingKeyAuthSourcePlatformQuotas(source)
 }
 
 var (
 	emailAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "email",
 		balance:          SettingKeyAuthSourceDefaultEmailBalance,
 		concurrency:      SettingKeyAuthSourceDefaultEmailConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultEmailSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultEmailGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultEmailGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("email"),
 	}
 	linuxDoAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "linuxdo",
 		balance:          SettingKeyAuthSourceDefaultLinuxDoBalance,
 		concurrency:      SettingKeyAuthSourceDefaultLinuxDoConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultLinuxDoSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultLinuxDoGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultLinuxDoGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("linuxdo"),
 	}
 	oidcAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "oidc",
 		balance:          SettingKeyAuthSourceDefaultOIDCBalance,
 		concurrency:      SettingKeyAuthSourceDefaultOIDCConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultOIDCSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultOIDCGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultOIDCGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("oidc"),
 	}
 	weChatAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "wechat",
 		balance:          SettingKeyAuthSourceDefaultWeChatBalance,
 		concurrency:      SettingKeyAuthSourceDefaultWeChatConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultWeChatSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultWeChatGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultWeChatGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("wechat"),
 	}
 	gitHubAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "github",
 		balance:          SettingKeyAuthSourceDefaultGitHubBalance,
 		concurrency:      SettingKeyAuthSourceDefaultGitHubConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultGitHubSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultGitHubGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultGitHubGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("github"),
 	}
 	googleAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "google",
 		balance:          SettingKeyAuthSourceDefaultGoogleBalance,
 		concurrency:      SettingKeyAuthSourceDefaultGoogleConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultGoogleSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultGoogleGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultGoogleGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("google"),
 	}
 	dingTalkAuthSourceDefaultKeys = authSourceDefaultKeySet{
+		source:           "dingtalk",
 		balance:          SettingKeyAuthSourceDefaultDingTalkBalance,
 		concurrency:      SettingKeyAuthSourceDefaultDingTalkConcurrency,
 		subscriptions:    SettingKeyAuthSourceDefaultDingTalkSubscriptions,
 		grantOnSignup:    SettingKeyAuthSourceDefaultDingTalkGrantOnSignup,
 		grantOnFirstBind: SettingKeyAuthSourceDefaultDingTalkGrantOnFirstBind,
+		platformQuotas:   SettingKeyAuthSourcePlatformQuotas("dingtalk"),
 	}
 )
 
@@ -597,6 +623,23 @@ func (s *SettingService) SetProxyRepository(repo ProxyRepository) {
 	s.proxyRepo = repo
 }
 
+func (s *SettingService) LoadAPIKeyACLTrustForwardedIPSetting(ctx context.Context) error {
+	if s == nil || s.cfg == nil || s.settingRepo == nil {
+		return nil
+	}
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyAPIKeyACLTrustForwardedIP)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			s.cfg.SetTrustForwardedIPForAPIKeyACL(s.cfg.Security.TrustForwardedIPForAPIKeyACL)
+			return nil
+		}
+		return fmt.Errorf("get api key acl forwarded ip setting: %w", err)
+	}
+	enabled := value == "true"
+	s.cfg.SetTrustForwardedIPForAPIKeyACL(enabled)
+	return nil
+}
+
 // GetAllSettings 获取所有系统设置
 func (s *SettingService) GetAllSettings(ctx context.Context) (*SystemSettings, error) {
 	settings, err := s.settingRepo.GetAll(ctx)
@@ -633,6 +676,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyLoginAgreementDocuments,
 		SettingKeyTurnstileEnabled,
 		SettingKeyTurnstileSiteKey,
+		SettingKeyAPIKeyACLTrustForwardedIP,
 		SettingKeySiteName,
 		SettingKeySiteLogo,
 		SettingKeySiteSubtitle,
@@ -1568,6 +1612,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	if settings.TurnstileSecretKey != "" {
 		updates[SettingKeyTurnstileSecretKey] = settings.TurnstileSecretKey
 	}
+	updates[SettingKeyAPIKeyACLTrustForwardedIP] = strconv.FormatBool(settings.APIKeyACLTrustForwardedIP)
 
 	// LinuxDo Connect OAuth 登录
 	updates[SettingKeyLinuxDoConnectEnabled] = strconv.FormatBool(settings.LinuxDoConnectEnabled)
@@ -1777,14 +1822,47 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingPaymentVisibleMethodWxpayEnabled] = strconv.FormatBool(settings.PaymentVisibleMethodWxpayEnabled)
 	updates[openAIAdvancedSchedulerSettingKey] = strconv.FormatBool(settings.OpenAIAdvancedSchedulerEnabled)
 
-	// Balance low notification
+	// 余额、订阅到期与账号限额通知
 	updates[SettingKeyBalanceLowNotifyEnabled] = strconv.FormatBool(settings.BalanceLowNotifyEnabled)
 	updates[SettingKeyBalanceLowNotifyThreshold] = strconv.FormatFloat(settings.BalanceLowNotifyThreshold, 'f', 8, 64)
 	updates[SettingKeyBalanceLowNotifyRechargeURL] = settings.BalanceLowNotifyRechargeURL
+	updates[SettingKeySubscriptionExpiryNotifyEnabled] = strconv.FormatBool(settings.SubscriptionExpiryNotifyEnabled)
 	updates[SettingKeyAccountQuotaNotifyEnabled] = strconv.FormatBool(settings.AccountQuotaNotifyEnabled)
 	updates[SettingKeyAccountQuotaNotifyEmails] = MarshalNotifyEmails(settings.AccountQuotaNotifyEmails)
 
+	// 系统全局 platform quota：整体替换语义（null/缺省 = 不限制）。
+	if settings.DefaultPlatformQuotas != nil {
+		if err := validateDefaultPlatformQuotaMap(settings.DefaultPlatformQuotas); err != nil {
+			return nil, err
+		}
+		blob, err := json.Marshal(settings.DefaultPlatformQuotas)
+		if err != nil {
+			return nil, fmt.Errorf("marshal default platform quotas: %w", err)
+		}
+		updates[SettingKeyDefaultPlatformQuotas] = string(blob)
+	}
+
 	return updates, nil
+}
+
+// validateDefaultPlatformQuotaMap 校验 platform quota map 的合法性：
+// 平台名须在 AllowedQuotaPlatforms 白名单内，每个非 nil 上限须 finite 且 >= 0。
+// 系统层和 auth-source 层共用此 helper。
+func validateDefaultPlatformQuotaMap(m map[string]*DefaultPlatformQuotaSetting) error {
+	for platform, pq := range m {
+		if !IsAllowedQuotaPlatform(platform) {
+			return infraerrors.BadRequest("INVALID_DEFAULT_PLATFORM_QUOTA", fmt.Sprintf("unknown platform %q", platform))
+		}
+		if pq == nil {
+			continue
+		}
+		for _, v := range []*float64{pq.DailyLimitUSD, pq.WeeklyLimitUSD, pq.MonthlyLimitUSD} {
+			if v != nil && (*v < 0 || math.IsNaN(*v) || math.IsInf(*v, 0)) {
+				return infraerrors.BadRequest("INVALID_DEFAULT_PLATFORM_QUOTA", "platform quota limit must be a finite non-negative number")
+			}
+		}
+	}
+	return nil
 }
 
 func (s *SettingService) buildAuthSourceDefaultUpdates(ctx context.Context, settings *AuthSourceDefaultSettings) (map[string]string, error) {
@@ -1803,6 +1881,26 @@ func (s *SettingService) buildAuthSourceDefaultUpdates(ctx context.Context, sett
 	} {
 		if err := s.validateDefaultSubscriptionGroups(ctx, subscriptions); err != nil {
 			return nil, err
+		}
+	}
+
+	// 校验各 auth source 的 platform quota map（改动 C：对等系统层校验）
+	for _, pgs := range []struct {
+		name string
+		pq   map[string]*DefaultPlatformQuotaSetting
+	}{
+		{"email", settings.Email.PlatformQuotas},
+		{"linuxdo", settings.LinuxDo.PlatformQuotas},
+		{"oidc", settings.OIDC.PlatformQuotas},
+		{"wechat", settings.WeChat.PlatformQuotas},
+		{"github", settings.GitHub.PlatformQuotas},
+		{"google", settings.Google.PlatformQuotas},
+		{"dingtalk", settings.DingTalk.PlatformQuotas},
+	} {
+		if pgs.pq != nil {
+			if err := validateDefaultPlatformQuotaMap(pgs.pq); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1867,6 +1965,9 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		enabled:   settings.OpenAIAdvancedSchedulerEnabled,
 		expiresAt: time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
 	})
+	if s.cfg != nil {
+		s.cfg.SetTrustForwardedIPForAPIKeyACL(settings.APIKeyACLTrustForwardedIP)
+	}
 	if s.onUpdate != nil {
 		s.onUpdate() // Invalidate cache after settings update
 	}
@@ -2363,6 +2464,13 @@ func (s *SettingService) GetAuthSourceDefaultSettings(ctx context.Context) (*Aut
 		SettingKeyAuthSourceDefaultDingTalkSubscriptions,
 		SettingKeyAuthSourceDefaultDingTalkGrantOnSignup,
 		SettingKeyAuthSourceDefaultDingTalkGrantOnFirstBind,
+		SettingKeyAuthSourcePlatformQuotas("email"),
+		SettingKeyAuthSourcePlatformQuotas("linuxdo"),
+		SettingKeyAuthSourcePlatformQuotas("oidc"),
+		SettingKeyAuthSourcePlatformQuotas("wechat"),
+		SettingKeyAuthSourcePlatformQuotas("github"),
+		SettingKeyAuthSourcePlatformQuotas("google"),
+		SettingKeyAuthSourcePlatformQuotas("dingtalk"),
 		SettingKeyForceEmailOnThirdPartySignup,
 	}
 
@@ -2463,6 +2571,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyLoginAgreementMode:                        defaultLoginAgreementMode,
 		SettingKeyLoginAgreementUpdatedAt:                   defaultLoginAgreementDate,
 		SettingKeyLoginAgreementDocuments:                   loginAgreementDocumentsJSON,
+		SettingKeyAPIKeyACLTrustForwardedIP:                 "false",
 		SettingKeySiteName:                                  "Sub2API",
 		SettingKeySiteLogo:                                  "",
 		SettingKeyPurchaseSubscriptionEnabled:               "false",
@@ -2622,6 +2731,12 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	if loginAgreementUpdatedAt == "" {
 		loginAgreementUpdatedAt = defaultLoginAgreementDate
 	}
+	apiKeyACLTrustForwardedIP := false
+	if value, ok := settings[SettingKeyAPIKeyACLTrustForwardedIP]; ok {
+		apiKeyACLTrustForwardedIP = value == "true"
+	} else if s != nil && s.cfg != nil {
+		apiKeyACLTrustForwardedIP = s.cfg.Security.TrustForwardedIPForAPIKeyACL
+	}
 	result := &SystemSettings{
 		RegistrationEnabled:              settings[SettingKeyRegistrationEnabled] == "true",
 		EmailVerifyEnabled:               emailVerifyEnabled,
@@ -2644,6 +2759,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		TurnstileEnabled:                 settings[SettingKeyTurnstileEnabled] == "true",
 		TurnstileSiteKey:                 settings[SettingKeyTurnstileSiteKey],
 		TurnstileSecretKeyConfigured:     settings[SettingKeyTurnstileSecretKey] != "",
+		APIKeyACLTrustForwardedIP:        apiKeyACLTrustForwardedIP,
 		SiteName:                         s.getStringOrDefault(settings, SettingKeySiteName, "Sub2API"),
 		SiteLogo:                         settings[SettingKeySiteLogo],
 		SiteSubtitle:                     s.getStringOrDefault(settings, SettingKeySiteSubtitle, "Subscription to API Conversion Platform"),
@@ -3131,20 +3247,31 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.PaymentVisibleMethodWxpayEnabled = settings[SettingPaymentVisibleMethodWxpayEnabled] == "true"
 	result.OpenAIAdvancedSchedulerEnabled = settings[openAIAdvancedSchedulerSettingKey] == "true"
 
-	// Balance low notification
+	// 余额、订阅到期与账号限额通知
 	result.BalanceLowNotifyEnabled = settings[SettingKeyBalanceLowNotifyEnabled] == "true"
 	if v, err := strconv.ParseFloat(settings[SettingKeyBalanceLowNotifyThreshold], 64); err == nil && v >= 0 {
 		result.BalanceLowNotifyThreshold = v
 	}
 	result.BalanceLowNotifyRechargeURL = settings[SettingKeyBalanceLowNotifyRechargeURL]
+	result.SubscriptionExpiryNotifyEnabled = !isFalseSettingValue(settings[SettingKeySubscriptionExpiryNotifyEnabled])
 
-	// Account quota notification
+	// 账号限额通知
 	result.AccountQuotaNotifyEnabled = settings[SettingKeyAccountQuotaNotifyEnabled] == "true"
 	if raw := strings.TrimSpace(settings[SettingKeyAccountQuotaNotifyEmails]); raw != "" {
 		result.AccountQuotaNotifyEmails = ParseNotifyEmails(raw)
 	}
 	if result.AccountQuotaNotifyEmails == nil {
 		result.AccountQuotaNotifyEmails = []NotifyEmailEntry{}
+	}
+
+	// 系统层默认 platform quota（修复 Bug B：parseSettings 不填充导致回显恒为 nil）
+	if raw := settings[SettingKeyDefaultPlatformQuotas]; raw != "" {
+		parsed := map[string]*DefaultPlatformQuotaSetting{}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			slog.Warn("[Setting] parseSettings: unmarshal default_platform_quotas failed", "error", err)
+		} else {
+			result.DefaultPlatformQuotas = parsed
+		}
 	}
 
 	return result
@@ -3239,6 +3366,15 @@ func parseProviderDefaultGrantSettings(settings map[string]string, keys authSour
 		result.GrantOnFirstBind = raw == "true"
 	}
 
+	if raw := settings[keys.platformQuotas]; raw != "" {
+		parsed := map[string]*DefaultPlatformQuotaSetting{}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			slog.Warn("[Setting] parseProviderDefaultGrantSettings: unmarshal auth source platform quotas failed", "source", keys.source, "error", err)
+		} else {
+			result.PlatformQuotas = parsed
+		}
+	}
+
 	return result
 }
 
@@ -3257,6 +3393,17 @@ func writeProviderDefaultGrantUpdates(updates map[string]string, keys authSource
 	updates[keys.subscriptions] = string(raw)
 	updates[keys.grantOnSignup] = strconv.FormatBool(settings.GrantOnSignup)
 	updates[keys.grantOnFirstBind] = strconv.FormatBool(settings.GrantOnFirstBind)
+
+	// auth source platform quota：整体替换语义。
+	// nil = 请求未携带该字段，跳过写入以保留既有配置（与系统层 buildSystemSettingsUpdates 的
+	// DefaultPlatformQuotas nil 守卫一致）；非 nil（含空 map）才整体替换。二者语义不可混同。
+	if keys.platformQuotas != "" && settings.PlatformQuotas != nil {
+		blob, err := json.Marshal(settings.PlatformQuotas)
+		if err != nil {
+			blob = []byte("{}")
+		}
+		updates[keys.platformQuotas] = string(blob)
+	}
 }
 
 func mergeProviderDefaultGrantSettings(globalDefaults ProviderDefaultGrantSettings, providerDefaults ProviderDefaultGrantSettings) ProviderDefaultGrantSettings {
@@ -4460,4 +4607,64 @@ func (s *SettingService) SetStreamTimeoutSettings(ctx context.Context, settings 
 	}
 
 	return s.settingRepo.Set(ctx, SettingKeyStreamTimeoutSettings, string(data))
+}
+
+// GetDefaultPlatformQuotas 读取系统全局 platform quota JSON key，返回 4 platform x 3 window 的设置。
+// 永远返回包含全部 4 platform key 的 map（值可能为零值/nil 字段，表示"上层未配置 = 不限制"）。
+//
+// 使用单个 JSON key（default_platform_quotas），一次 DB roundtrip，消除旧 12-KV 格式的 N+1 问题。
+// 容错语义：取值失败或 unmarshal 失败 → 返回补齐 4 key 的空 map（fail-open，注册不被阻断）。
+func (s *SettingService) GetDefaultPlatformQuotas(ctx context.Context) (map[string]*DefaultPlatformQuotaSetting, error) {
+	out := map[string]*DefaultPlatformQuotaSetting{
+		"anthropic":   {},
+		"openai":      {},
+		"gemini":      {},
+		"antigravity": {},
+	}
+	raw, err := s.settingRepo.GetValue(ctx, SettingKeyDefaultPlatformQuotas)
+	if err != nil || raw == "" {
+		return out, nil // 无配置 = 全部不限制
+	}
+	parsed := map[string]*DefaultPlatformQuotaSetting{}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		slog.Warn("[Setting] unmarshal default_platform_quotas failed (fail-open)", "error", err)
+		return out, nil
+	}
+	for _, platform := range AllowedQuotaPlatforms {
+		if v := parsed[platform]; v != nil {
+			out[platform] = v
+		}
+	}
+	return out, nil // 补齐 4 platform key，保持与旧实现一致的下游契约
+}
+
+// GetAuthSourcePlatformQuotas 读取指定 auth source 的 platform quota 覆盖（仅返回有配置的平台，override 语义）。
+func (s *SettingService) GetAuthSourcePlatformQuotas(ctx context.Context, source string) map[string]*DefaultPlatformQuotaSetting {
+	out := map[string]*DefaultPlatformQuotaSetting{}
+	raw, err := s.settingRepo.GetValue(ctx, SettingKeyAuthSourcePlatformQuotas(source))
+	if err != nil || raw == "" {
+		return out // 无 override
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		slog.Warn("[Setting] unmarshal auth source platform quotas failed (fail-open)", "source", source, "error", err)
+		return map[string]*DefaultPlatformQuotaSetting{}
+	}
+	return out // 仅含已配置平台，保持 override 语义
+}
+
+// mergePlatformQuotaDefaults 按字段级 patch：src 中非 nil 字段覆盖 dst。
+// 区分 nil（"未配置"，保留 dst）vs &0.0（"显式禁用"，覆盖 dst 为 0）
+func mergePlatformQuotaDefaults(dst, src *DefaultPlatformQuotaSetting) {
+	if src == nil || dst == nil {
+		return
+	}
+	if src.DailyLimitUSD != nil {
+		dst.DailyLimitUSD = src.DailyLimitUSD
+	}
+	if src.WeeklyLimitUSD != nil {
+		dst.WeeklyLimitUSD = src.WeeklyLimitUSD
+	}
+	if src.MonthlyLimitUSD != nil {
+		dst.MonthlyLimitUSD = src.MonthlyLimitUSD
+	}
 }
